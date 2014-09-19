@@ -7,7 +7,7 @@ import Control.Monad          (forM_)
 import Control.Monad.Identity (Identity(..))
 import Control.Monad.State (StateT, evalStateT)
 import Control.Monad.Trans (MonadIO(liftIO), lift)
-import Control.Wire (Wire, Event, Session, HasTime, clockSession_, stepWire, stepSession)
+import Control.Wire (Wire, Event, Session, Timed(..), countSession_, stepWire, stepSession)
 import Control.Wire.Unsafe.Event
 import qualified Data.IntMap as IntMap
 import Data.IntMap (IntMap)
@@ -60,10 +60,10 @@ drawLights window v = liftIO $
      GL.flush
      GLFW.swapBuffers window
 
-simulateShow :: (MonadIO m, Fractional t, HasTime t s) =>
+simulateShow :: (MonadIO m) =>
                 GLFW.Window
              -> V.IOVector Switch
-             -> Session m s
+             -> Session m (Timed Int ())
              -> MidiLights
              -> m a
 simulateShow window v s0 w0 = loop s0 w0
@@ -90,8 +90,8 @@ simulate midiLights =
     GLFW.setWindowSizeCallback window (Just resize)
     GL.depthFunc $= Just GL.Less
     v <- V.replicate 10 Open
-    simulateShow window v clockSession_ midiLights
+    simulateShow window v (countSession_ 1) midiLights
     return ()
 
 main :: IO ()
-main = simulate chase
+main = simulate kickSnare
