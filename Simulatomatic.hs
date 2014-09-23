@@ -94,4 +94,5 @@ simulate midiLights =
     return ()
 
 main :: IO ()
-main = simulate kickSnare
+main = simulate modeWatcher
+
