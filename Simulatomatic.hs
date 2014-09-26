@@ -106,9 +106,10 @@ fakeMidiClock bpm =
         Session $ do
           t <- liftIO getCurrentTime
           let dt = diffUTCTime t t'
-              dmc = floor (dt / secondsPerPulse)
+              dmc :: Int
+              dmc = floor (realToFrac (dt / secondsPerPulse))
           if dt > secondsPerPulse
-            then return (Timed 1 (), loop t)
+            then return (Timed dmc (), loop (addUTCTime ((fromIntegral dmc) * secondsPerPulse) t'))
             else return (Timed 0 (), loop t')
 --          liftIO $ print (dmc, secondsPerPulse)
 --          return (Timed dmc (), loop (addUTCTime (fromIntegral dmc) t'))
