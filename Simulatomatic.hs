@@ -7,8 +7,9 @@ import Control.Monad          (forM_)
 import Control.Monad.Identity (Identity(..))
 import Control.Monad.State (StateT, evalStateT)
 import Control.Monad.Trans (MonadIO(liftIO), lift)
-import Control.Wire (Wire, Event, Session, Timed(..), countSession_, stepWire, stepSession)
+import Control.Wire (Wire, Event, Session(..), Timed(..), countSession_, stepWire, stepSession)
 import Control.Wire.Unsafe.Event
+import Data.Time.Clock
 import qualified Data.IntMap as IntMap
 import Data.IntMap (IntMap)
 import Data.Maybe  (fromJust)
@@ -16,6 +17,7 @@ import qualified Data.Vector.Mutable as V
 import qualified Graphics.Rendering.OpenGL as GL
 import Graphics.Rendering.OpenGL (($=))
 import qualified Graphics.UI.GLFW as GLFW
+import Sound.NH.MIDI.Core (MIDI(MidiClock))
 
 colorMap :: IntMap (GL.Color3 GL.GLfloat)
 colorMap = IntMap.fromList
@@ -77,22 +79,39 @@ simulateShow window v s0 w0 = loop s0 w0
                  perform (SendCmd (Command channel switch)) =
                    liftIO $ V.write v (fromIntegral channel) switch
              mapM_ perform actions
+             liftIO $ GLFW.pollEvents
+             drawLights window v
         _                 -> return ()
-      liftIO $ GLFW.pollEvents
-      drawLights window v
       loop s w
 
-simulate :: MidiLights -> IO ()
-simulate midiLights =
+simulate :: Double -> MidiLights -> IO ()
+simulate bpm midiLights =
   bracket GLFW.init (const GLFW.terminate) $ \True -> do
     (Just window) <- GLFW.createWindow 640 480 "blinkomatic" Nothing Nothing
     GLFW.makeContextCurrent (Just window)
     GLFW.setWindowSizeCallback window (Just resize)
     GL.depthFunc $= Just GL.Less
     v <- V.replicate 10 Open
-    simulateShow window v (countSession_ 1) midiLights
+    simulateShow window v (fakeMidiClock bpm) midiLights
     return ()
 
-main :: IO ()
-main = simulate modeWatcher
+fakeMidiClock :: (MonadIO m) => Double -> MidiSession m
+fakeMidiClock bpm =
+  Session $ do
+    t0 <- liftIO getCurrentTime
+    return (Timed 0 (), loop t0)
+    where
+      secondsPerPulse = ((1 / (realToFrac bpm)) * 60) / 24
+      loop t' =
+        Session $ do
+          t <- liftIO getCurrentTime
+          let dt = diffUTCTime t t'
+              dmc = floor (dt / secondsPerPulse)
+          if dt > secondsPerPulse
+            then return (Timed 1 (), loop t)
+            else return (Timed 0 (), loop t')
+--          liftIO $ print (dmc, secondsPerPulse)
+--          return (Timed dmc (), loop (addUTCTime (fromIntegral dmc) t'))
 
+main :: IO ()
+main = simulate 120 newChase

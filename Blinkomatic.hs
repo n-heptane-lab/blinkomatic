@@ -69,13 +69,14 @@ serializeCommand (Command channel switch) =
                                Open  -> 0
                                Close -> 1)
 
-type MidiWire   = Wire (Timed Int ()) () Identity
-type MidiLights = Wire (Timed Int ()) () Identity (Event MIDI) (Event [OutputEvent])
+type MidiTimed   = Timed Int ()
+type MidiSession m = Session m MidiTimed
+type MidiWire    = Wire MidiTimed () Identity
+type MidiLights  = Wire MidiTimed () Identity (Event MIDI) (Event [OutputEvent])
 
 -- instance HasTime (Timed Int ())
 
-beatSession :: (MonadIO m) =>
-               Session m (Timed Int ())
+beatSession :: (MonadIO m) => MidiSession m
 beatSession =
   Session $ do
 --    p0 <- liftIO $ atomically $ waitN pos 1
@@ -90,11 +91,11 @@ beatSession =
 
 runShow :: (MonadIO m) =>
            TMVar MIDI
-        -> SerialPort
-        -> Session m (Timed Int ())
+        -> (OutputEvent -> m ())
+        -> MidiSession m
         -> MidiLights
         -> m a
-runShow midi serialPort s0 w0 = loop s0 w0
+runShow midi output s0 w0 = loop s0 w0
   where
     loop s' w' = do
       m <- liftIO $ atomically $ takeTMVar midi
@@ -112,9 +113,7 @@ runShow midi serialPort s0 w0 = loop s0 w0
                                             ) -}
       case mx of
         (Right (Event actions)) ->
-          do let perform (Print s)     = liftIO $ putStrLn s
-                 perform (SendCmd cmd) = liftIO $ send serialPort (singleton $ serializeCommand cmd) >> return ()
-             mapM_ perform actions
+          do mapM_ output actions
         _                 -> return ()
       loop s w
 
@@ -124,6 +123,10 @@ midiConsumer t =
    forever $ do
      m <- await
      lift $ atomically $ putTMVar t m
+
+standardOutput :: (MonadIO m) => SerialPort -> OutputEvent -> m ()
+standardOutput _ (Print str)   = liftIO $ putStrLn str
+standardOutput s (SendCmd cmd) = liftIO $ send s (singleton $ serializeCommand cmd) >> return ()
 
 blinkomatic :: String -> String -> MidiLights -> IO ()
 blinkomatic midiDevice1 midiDevice2 ml =
@@ -139,7 +142,7 @@ blinkomatic midiDevice1 midiDevice2 ml =
             forkIO $ runEffect $ (lift $ RawMidi.read h2) >~ parseMidi >-> midiConsumer t
             forkIO $ runEffect $ (lift $ RawMidi.read h1) >~ parseMidi >-> midiConsumer t
             s <- openSerial port defaultSerialSettings { commSpeed = baud }
-            runShow t s beatSession ml
+            runShow t (standardOutput s) beatSession ml
 
 
 atMod :: (HasTime t s, Integral t) =>
@@ -235,16 +238,10 @@ oneMeasure =
                        , SendCmd $ Command red        Open]) -->
       loop
 
--- instance HasTime Int (Timed Int ())
-
 nowNow :: MidiLights
 nowNow =
   periodic 1 . (pure [Print "now"])
-{-
-asum :: Alternative f => [f a] -> f a
-asum l =
-  foldr (<|>) empty l
--}
+
 oneMeasure2 :: MidiLights
 oneMeasure2 =
   let redOnly        = [ SendCmd $ Command red        Close
@@ -321,6 +318,10 @@ modeSwitcher =
       (Event m) ->
         returnA -< (Event m, NoEvent)
       NoEvent   -> returnA -< (NoEvent, NoEvent)
+
+showMidi :: MidiLights
+showMidi =
+  accumE (\_ m -> [Print $ show m]) []
 
 
   {-
@@ -422,7 +423,3 @@ oneMeasure2 = periodic 1 .
                            ]) -->
   kickSnare
 -}
-
-showMidi :: MidiLights
-showMidi =
-  accumE (\_ m -> [Print $ show m]) []
