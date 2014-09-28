@@ -95,12 +95,14 @@ simulate bpm midiLights =
     simulateShow window v (fakeMidiClock bpm) midiLights
     return ()
 
+
 fakeMidiClock :: (MonadIO m) => Double -> MidiSession m
 fakeMidiClock bpm =
   Session $ do
     t0 <- liftIO getCurrentTime
     return (Timed 0 (), loop t0)
     where
+      secondsPerPulse :: NominalDiffTime
       secondsPerPulse = ((1 / (realToFrac bpm)) * 60) / 24
       loop t' =
         Session $ do
@@ -111,8 +113,7 @@ fakeMidiClock bpm =
           if dt > secondsPerPulse
             then return (Timed dmc (), loop (addUTCTime ((fromIntegral dmc) * secondsPerPulse) t'))
             else return (Timed 0 (), loop t')
---          liftIO $ print (dmc, secondsPerPulse)
---          return (Timed dmc (), loop (addUTCTime (fromIntegral dmc) t'))
+
 
 main :: IO ()
 main = simulate 120 newChase

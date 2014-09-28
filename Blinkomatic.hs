@@ -3,7 +3,7 @@ module Blinkomatic where
 
 import Control.Arrow
 -- import Control.Applicative
-import Control.Concurrent           (forkIO)
+import Control.Concurrent           (ThreadId, forkIO, threadDelay)
 import Control.Concurrent.STM       (atomically)
 -- import Control.Concurrent.STM.TVar  (TVar, newTVarIO, readTVarIO, writeTVar, modifyTVar')
 import Control.Concurrent.STM.TMVar (TMVar, newEmptyTMVar, putTMVar, takeTMVar, tryTakeTMVar)
@@ -16,20 +16,52 @@ import Control.Wire.Unsafe.Event
 import Control.Monad.Identity (Identity(..))
 import Control.Monad.Trans (MonadIO(..))
 import Data.Bits           ((.|.), shiftL)
-import Data.ByteString     (singleton)
+import Data.ByteString     (ByteString, pack, singleton)
+import qualified Data.ByteString as B
 import Data.Data (Data, Typeable)
-import Data.Foldable       (asum)
+import Data.Foldable       (asum, foldMap)
+import Data.Time.Clock     (addUTCTime, diffUTCTime, getCurrentTime)
+import Data.Vector (Vector)
+import qualified Data.Vector as V
 import Data.Word (Word8)
 import Debug.Trace (trace)
+import FRP.Netwire.Move (integral)
 import Pipes          ((>~), (>->), Consumer, await, runEffect)
-import Prelude hiding ((.), id)
+import Prelude hiding ((.), id, until)
 import Sound.NH.MIDI.Core
 import Sound.NH.MIDI.Parse   (parseMidi)
 import Sound.NH.ALSA.RawMidi as RawMidi (RawMode(None), openInput, read, strError)
 import System.Hardware.Serialport (CommSpeed(CS9600), SerialPort, SerialPortSettings(commSpeed), defaultSerialSettings, openSerial, send)
 import System.Exit (exitFailure)
 
-port = "/dev/ttyUSB0"
+data RGB a = RGB
+  { r :: a
+  , g :: a
+  , b :: a
+  } deriving (Eq, Ord, Read, Show)
+
+packRGB :: RGB Word8
+        -> ByteString
+packRGB (RGB r g b) = pack [r,g,b]
+
+packRGBs :: Vector (RGB Word8)
+         -> ByteString
+packRGBs rgbs = foldMap packRGB rgbs
+
+stuff :: ByteString -> ByteString
+stuff b | B.length b > 254 = error "stuff not implemented for ByteStrings longer than 254 bytes. Submit a patch!"
+
+stuff b = (B.cons 0 (stuff' (B.snoc b 0)))
+  where
+    stuff' :: ByteString -> ByteString
+    stuff' b | B.null b = b
+    stuff' b =
+      case B.span (/= 0) b of
+        (b0, b1) ->
+          (B.cons (fromIntegral $ B.length b0 + 1) b0) <> (stuff' $ B.drop 1 b1)
+
+elPort = "/dev/ttyUSB0"
+tclPort = "/dev/ttyACM0"
 baud = CS9600
 
 data Switch
@@ -55,6 +87,7 @@ whiteStrip  = 8
 
 data OutputEvent
   = SendCmd Command
+  | TCL (Vector (RGB Word8))
   | Print String
 
 data Command = Command
@@ -89,6 +122,22 @@ beatSession =
 --        let dp = p - p'
         return (Timed 1 (), loop)
 
+clockThread :: TMVar MIDI -> Double -> IO ThreadId
+clockThread tm bpm = forkIO $
+  do t0 <- getCurrentTime
+     loop t0
+  where
+    secondsPerPulse = ((1 / (realToFrac bpm)) * 60) / 24
+    loop t' =
+      do t <- getCurrentTime
+         let dt = diffUTCTime t t'
+         if dt > secondsPerPulse
+           then do atomically $ putTMVar tm MidiClock
+--                   putStrLn "MidiClock sent."
+--                   threadDelay 10
+                   loop (addUTCTime secondsPerPulse t')
+           else loop t'
+
 runShow :: (MonadIO m) =>
            TMVar MIDI
         -> (OutputEvent -> m ())
@@ -99,18 +148,13 @@ runShow midi output s0 w0 = loop s0 w0
   where
     loop s' w' = do
       m <- liftIO $ atomically $ takeTMVar midi
+--      liftIO $ print m
       (ds, s) <-
         case m of
           MidiClock -> stepSession s'
           _         -> do -- liftIO $ print m
                           return (Timed 0 (), s')
-
---      (ds, s) <- stepSession s'
---      mm      <- liftIO $ atomically $ tryTakeTMVar midi
-      let Identity (mx, w) = stepWire w' ds (Right $ Event m) {- $ case mm of
-                                                       Nothing -> NoEvent
-                                                       (Just m) -> Event m
-                                            ) -}
+      let Identity (mx, w) = stepWire w' ds (Right $ Event m)
       case mx of
         (Right (Event actions)) ->
           do mapM_ output actions
@@ -124,10 +168,16 @@ midiConsumer t =
      m <- await
      lift $ atomically $ putTMVar t m
 
-standardOutput :: (MonadIO m) => SerialPort -> OutputEvent -> m ()
-standardOutput _ (Print str)   = liftIO $ putStrLn str
-standardOutput s (SendCmd cmd) = liftIO $ send s (singleton $ serializeCommand cmd) >> return ()
-
+standardOutput :: (MonadIO m) =>
+                  Maybe SerialPort
+               -> Maybe SerialPort
+               -> OutputEvent
+               -> m ()
+standardOutput _ _ (Print str)   = liftIO $ putStrLn str
+standardOutput (Just s) _ (SendCmd cmd) = liftIO $ send s (singleton $ serializeCommand cmd) >> return ()
+standardOutput Nothing  _ (SendCmd _) = return ()
+standardOutput _ (Just s) (TCL v)       = liftIO $ send s (stuff $ packRGBs v) >> return ()
+{-
 blinkomatic :: String -> String -> MidiLights -> IO ()
 blinkomatic midiDevice1 midiDevice2 ml =
   do t   <- atomically newEmptyTMVar
@@ -141,9 +191,21 @@ blinkomatic midiDevice1 midiDevice2 ml =
          do putStrLn "opened MPD32 MIDI Input."
             forkIO $ runEffect $ (lift $ RawMidi.read h2) >~ parseMidi >-> midiConsumer t
             forkIO $ runEffect $ (lift $ RawMidi.read h1) >~ parseMidi >-> midiConsumer t
-            s <- openSerial port defaultSerialSettings { commSpeed = baud }
-            runShow t (standardOutput s) beatSession ml
+            -- s1 <- openSerial port defaultSerialSettings { commSpeed = baud }
+            s2 <- openSerial tclPort defaultSerialSettings { commSpeed = baud }
+            runShow' t (standardOutput Nothing (Just s2)) beatSession ml
+-}
 
+blinkomatic :: TMVar MIDI -> MidiLights -> IO ()
+blinkomatic t ml =
+  do -- s1 <- openSerial port defaultSerialSettings { commSpeed = baud }
+     s2 <- openSerial tclPort defaultSerialSettings { commSpeed = baud }
+     runShow t (standardOutput Nothing (Just s2)) beatSession ml
+
+openMidi :: TMVar MIDI -> [String] -> IO ()
+openMidi t names =
+  do handles <- mapM (\name -> openInput name None) names
+     mapM_ (\(Right h) -> forkIO $ runEffect $ (lift $ RawMidi.read h) >~ parseMidi >-> midiConsumer t) handles
 
 atMod :: (HasTime t s, Integral t) =>
          t
@@ -173,6 +235,28 @@ rest' =
   for 25 . (now . pure (map (\c -> SendCmd $ Command c Open)  [darkOrange, lightOrange, green, blue, violet, white])) -->
   for 25 . (now . pure (map (\c -> SendCmd $ Command c Close) [darkOrange, lightOrange, green, blue, violet, white])) -->
   rest'
+
+tclRedBlue :: MidiLights
+tclRedBlue =
+  for quarter . now . pure [TCL $ V.replicate 25 (RGB 0xff 0x00 0x00)] -->
+  for quarter . now . pure [TCL $ V.replicate 25 (RGB 0x00 0x00 0xff)] -->
+  tclRedBlue
+
+tclFade :: MidiLights
+tclFade =
+  let fadeIn =
+        proc midi ->
+          do t <- time -< ()
+             v <- integral 0 -< (fromIntegral t)
+             q <- (periodic 1 . arr (\v -> [TCL $ V.replicate 25 $ RGB (floor v) 0x00 0x00])) &&& (became (> 255)) -< v
+             until -< q
+      fadeOut =
+        proc midi ->
+          do t <- time -< ()
+             v <- integral 0 -< (fromIntegral t)
+             q <- (periodic 1 . arr (\v -> [TCL $ V.replicate 25 $ RGB (0xff - (floor v)) 0x00 0x00])) &&& (became (> 255)) -< v
+             until -< q
+  in fadeIn --> fadeOut --> tclFade
 
 multi :: MidiLights
 multi =
