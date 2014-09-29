@@ -11,6 +11,6 @@ main =
   do m <- atomically newEmptyTMVar
      openMidi m [] -- ["hw:2,0,0", "hw:2,0,2"]
      clockThread m 120
-     blinkomatic m tclSlider3
+     blinkomatic m rainbow
 
 

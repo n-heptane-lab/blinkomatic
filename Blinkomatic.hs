@@ -299,12 +299,14 @@ tclSlider3 =
                returnA -< [TCL $ V.zipWith (<>) l r]
           ) --> loop
   in periodic 1 . loop
-{-
+
 rainbow :: MidiLights
 rainbow =
-  proc m ->
-    returnA -< now . []
--}
+  periodic 1 .
+    (proc _ ->
+        do t <- time -< ()
+           returnA -< [TCL $ V.generate 25 $ \i -> rgb_d2w $ hsl2rgb $ HSL ((360/25)*(fromIntegral ((i + (t `div` 4)) `mod` 25))) 1 0.5])
+
 decayElem :: MidiWire () (RGB Word8)
 decayElem =
   proc e ->
