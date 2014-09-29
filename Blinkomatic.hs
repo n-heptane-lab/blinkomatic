@@ -15,6 +15,7 @@ import Control.Wire.Core
 import Control.Wire.Unsafe.Event
 import Control.Monad.Identity (Identity(..))
 import Control.Monad.Trans (MonadIO(..))
+import Color
 import Data.Bits           ((.|.), shiftL)
 import Data.ByteString     (ByteString, pack, singleton)
 import qualified Data.ByteString as B
@@ -35,35 +36,11 @@ import Sound.NH.ALSA.RawMidi as RawMidi (RawMode(None), openInput, read, strErro
 import System.Hardware.Serialport (CommSpeed(CS9600, CS115200), SerialPort, SerialPortSettings(commSpeed), defaultSerialSettings, openSerial, send)
 import System.Exit (exitFailure)
 
--- | an RGB value
-data RGB a = RGB
-  { r :: a
-  , g :: a
-  , b :: a
-  } deriving (Eq, Ord, Read, Show)
-
-instance (Num a) => Semigroup (RGB a) where
-  (RGB r0 g0 b0) <> (RGB r1 g1 b1) =
-    RGB (r0 + r1) (g0 + g1) (b0 + b1)
-
 instance (Semigroup a) => Semigroup (Vector a) where
   a <> b =  a `mappend` b
 
 scaleRGB :: (Num a) => RGB a -> a -> RGB a
 scaleRGB (RGB r g b) s = RGB (r*s) (g*s) (b*s)
-
--- | standard colors
-blackRGB :: RGB Word8
-blackRGB = RGB 0x00 0x00 0x00
-
-redRGB :: RGB Word8
-redRGB = RGB 0xff 0x00 0x00
-
-greenRGB :: RGB Word8
-greenRGB = RGB 0x00 0xff 0x00
-
-blueRGB :: RGB Word8
-blueRGB = RGB 0x00 0x00 0xff
 
 packRGB :: RGB Word8
         -> ByteString
@@ -306,21 +283,28 @@ tclSlider3 =
   let slideR, slideL :: RGB Word8 -> MidiWire Int (Vector (RGB Word8))
       slideR color =
         proc t ->
-          do q <- (arr (\t' -> V.generate 25 (\i -> if i <= t' then color else blackRGB))) &&& (became (> 24)) -< t
-             until -< q
-      slideL color =
-        proc t ->
-          do q <- (arr (\t' -> V.generate 25 (\i -> if i >= (24 - t') then color else blackRGB))) &&& (became (> 24)) -< t
-             until -< q
-      loop =
-       (periodic 1 .
-          proc _ ->
-            do t <- time -< ()
-               (l, r) <- slideR blueRGB &&& slideL redRGB -< (t `div` 4)
-               returnA -< [TCL $ V.zipWith (<>) l r])
-        --> loop
-  in loop
+          do v <- arr (\t' -> V.generate 25 (\i -> if i <= t' then color else blackRGB)) -< t
+             b <- became (> 24) -< t
+             until -< (v, b)
 
+      -- similar to slideR but more pointless
+      slideL color =
+           until . (arr (\t' -> V.generate 25 (\i -> if i >= (24 - t') then color else blackRGB)) &&& (became (> 24)))
+
+      loop =
+          (proc _ ->
+            do t <- fmap (`div` 4) time  -< ()
+               l <- slideL redRGB  -< t
+               r <- slideR blueRGB -< t
+               returnA -< [TCL $ V.zipWith (<>) l r]
+          ) --> loop
+  in periodic 1 . loop
+{-
+rainbow :: MidiLights
+rainbow =
+  proc m ->
+    returnA -< now . []
+-}
 decayElem :: MidiWire () (RGB Word8)
 decayElem =
   proc e ->
