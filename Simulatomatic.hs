@@ -114,6 +114,5 @@ fakeMidiClock bpm =
             then return (Timed dmc (), loop (addUTCTime ((fromIntegral dmc) * secondsPerPulse) t'))
             else return (Timed 0 (), loop t')
 
-
 main :: IO ()
 main = simulate 120 newChase

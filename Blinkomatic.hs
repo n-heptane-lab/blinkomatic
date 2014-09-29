@@ -21,6 +21,7 @@ import qualified Data.ByteString as B
 import Data.Data (Data, Typeable)
 import Data.Foldable       (asum, foldMap)
 import Data.Time.Clock     (addUTCTime, diffUTCTime, getCurrentTime)
+import Data.Monoid         (Monoid(mappend, mempty))
 import Data.Vector (Vector)
 import qualified Data.Vector as V
 import Data.Word (Word8)
@@ -31,14 +32,38 @@ import Prelude hiding ((.), id, until)
 import Sound.NH.MIDI.Core
 import Sound.NH.MIDI.Parse   (parseMidi)
 import Sound.NH.ALSA.RawMidi as RawMidi (RawMode(None), openInput, read, strError)
-import System.Hardware.Serialport (CommSpeed(CS9600), SerialPort, SerialPortSettings(commSpeed), defaultSerialSettings, openSerial, send)
+import System.Hardware.Serialport (CommSpeed(CS9600, CS115200), SerialPort, SerialPortSettings(commSpeed), defaultSerialSettings, openSerial, send)
 import System.Exit (exitFailure)
 
+-- | an RGB value
 data RGB a = RGB
   { r :: a
   , g :: a
   , b :: a
   } deriving (Eq, Ord, Read, Show)
+
+instance (Num a) => Semigroup (RGB a) where
+  (RGB r0 g0 b0) <> (RGB r1 g1 b1) =
+    RGB (r0 + r1) (g0 + g1) (b0 + b1)
+
+instance (Semigroup a) => Semigroup (Vector a) where
+  a <> b =  a `mappend` b
+
+scaleRGB :: (Num a) => RGB a -> a -> RGB a
+scaleRGB (RGB r g b) s = RGB (r*s) (g*s) (b*s)
+
+-- | standard colors
+blackRGB :: RGB Word8
+blackRGB = RGB 0x00 0x00 0x00
+
+redRGB :: RGB Word8
+redRGB = RGB 0xff 0x00 0x00
+
+greenRGB :: RGB Word8
+greenRGB = RGB 0x00 0xff 0x00
+
+blueRGB :: RGB Word8
+blueRGB = RGB 0x00 0x00 0xff
 
 packRGB :: RGB Word8
         -> ByteString
@@ -48,9 +73,10 @@ packRGBs :: Vector (RGB Word8)
          -> ByteString
 packRGBs rgbs = foldMap packRGB rgbs
 
+-- | FIXME: handle longer than 254
+-- FIXME: handle 0xFF and non-zero termination
 stuff :: ByteString -> ByteString
 stuff b | B.length b > 254 = error "stuff not implemented for ByteStrings longer than 254 bytes. Submit a patch!"
-
 stuff b = (B.cons 0 (stuff' (B.snoc b 0)))
   where
     stuff' :: ByteString -> ByteString
@@ -61,8 +87,10 @@ stuff b = (B.cons 0 (stuff' (B.snoc b 0)))
           (B.cons (fromIntegral $ B.length b0 + 1) b0) <> (stuff' $ B.drop 1 b1)
 
 elPort = "/dev/ttyUSB0"
+elBaud = CS9600
+
 tclPort = "/dev/ttyACM0"
-baud = CS9600
+tclBaud = CS115200
 
 data Switch
   = Open
@@ -89,6 +117,11 @@ data OutputEvent
   = SendCmd Command
   | TCL (Vector (RGB Word8))
   | Print String
+    deriving Show
+
+instance (Show a) => Show (Event a) where
+  show (Event a) = "Event " ++ show a
+  show NoEvent   = "NoEvent"
 
 data Command = Command
     { channel :: Word8
@@ -177,29 +210,11 @@ standardOutput _ _ (Print str)   = liftIO $ putStrLn str
 standardOutput (Just s) _ (SendCmd cmd) = liftIO $ send s (singleton $ serializeCommand cmd) >> return ()
 standardOutput Nothing  _ (SendCmd _) = return ()
 standardOutput _ (Just s) (TCL v)       = liftIO $ send s (stuff $ packRGBs v) >> return ()
-{-
-blinkomatic :: String -> String -> MidiLights -> IO ()
-blinkomatic midiDevice1 midiDevice2 ml =
-  do t   <- atomically newEmptyTMVar
-     mh1 <- openInput midiDevice1 None
-     mh2 <- openInput midiDevice2 None
-     case (mh1, mh2) of
-       (Left e, Left e') ->
-         do putStrLn =<< strError e
-            exitFailure
-       (Right h1, Right h2) ->
-         do putStrLn "opened MPD32 MIDI Input."
-            forkIO $ runEffect $ (lift $ RawMidi.read h2) >~ parseMidi >-> midiConsumer t
-            forkIO $ runEffect $ (lift $ RawMidi.read h1) >~ parseMidi >-> midiConsumer t
-            -- s1 <- openSerial port defaultSerialSettings { commSpeed = baud }
-            s2 <- openSerial tclPort defaultSerialSettings { commSpeed = baud }
-            runShow' t (standardOutput Nothing (Just s2)) beatSession ml
--}
 
 blinkomatic :: TMVar MIDI -> MidiLights -> IO ()
 blinkomatic t ml =
   do -- s1 <- openSerial port defaultSerialSettings { commSpeed = baud }
-     s2 <- openSerial tclPort defaultSerialSettings { commSpeed = baud }
+     s2 <- openSerial tclPort defaultSerialSettings { commSpeed = tclBaud }
      runShow t (standardOutput Nothing (Just s2)) beatSession ml
 
 openMidi :: TMVar MIDI -> [String] -> IO ()
@@ -257,6 +272,67 @@ tclFade =
              q <- (periodic 1 . arr (\v -> [TCL $ V.replicate 25 $ RGB (0xff - (floor v)) 0x00 0x00])) &&& (became (> 255)) -< v
              until -< q
   in fadeIn --> fadeOut --> tclFade
+
+tclSlider :: MidiLights
+tclSlider =
+  let right =
+        proc midi ->
+          do t <- time -< ()
+             v <- id -< (fromIntegral t)
+             q <- (periodic 1 . arr (\v -> [TCL $ V.generate 25 (\i -> if i <= (floor v) then (RGB 0xff 0x00 0x00) else (RGB 0x00 0x00 0x00))])) &&& (became (> 24)) -< v
+             until -< q
+      left =
+        proc midi ->
+          do t <- time -< ()
+             v <- id -< (fromIntegral t)
+             q <- (periodic 1 . arr (\v -> [TCL $ V.generate 25 (\i -> if i >= (floor v) then (RGB 0xff 0x00 0x00) else (RGB 0x00 0x00 0x00))])) &&& (became (> 24)) -< (v :: Double)
+             until -< q
+  in right --> left --> tclSlider
+
+
+tclSlider2 :: MidiLights
+tclSlider2 =
+  let right =
+        proc midi ->
+          do t <- time -< ()
+             v <- arr (/ 4) -< (fromIntegral t)
+             q <- (periodic 1 . arr (\v -> [TCL $ V.generate 25 (\i -> if i <= (floor v) then (RGB (floor $ 255 * (fromIntegral i)/v) 0x00 0x00) else (RGB 0x00 0x00 0x00))])) &&& (became (> 24)) -< (v :: Double)
+             until -< q
+  in right --> tclSlider2
+
+
+tclSlider3 :: MidiLights
+tclSlider3 =
+  let slideR, slideL :: RGB Word8 -> MidiWire Int (Vector (RGB Word8))
+      slideR color =
+        proc t ->
+          do q <- (arr (\t' -> V.generate 25 (\i -> if i <= t' then color else blackRGB))) &&& (became (> 24)) -< t
+             until -< q
+      slideL color =
+        proc t ->
+          do q <- (arr (\t' -> V.generate 25 (\i -> if i >= (24 - t') then color else blackRGB))) &&& (became (> 24)) -< t
+             until -< q
+      loop =
+       (periodic 1 .
+          proc _ ->
+            do t <- time -< ()
+               (l, r) <- slideR blueRGB &&& slideL redRGB -< (t `div` 4)
+               returnA -< [TCL $ V.zipWith (<>) l r])
+        --> loop
+  in loop
+
+decayElem :: MidiWire () (RGB Word8)
+decayElem =
+  proc e ->
+    do t <- (arr $ (* 2)) . time -< e
+       until . (arr (\t -> RGB (255 - (fromIntegral t)) 0 0) &&& (became (>= 255))) -< t
+
+decay :: MidiLights
+decay = (for 300 . never) -->
+  proc _ ->
+   do e <- decayElem -< ()
+      periodic 1 -< [TCL $ V.replicate 25 e]
+--       1 -< [TCL $ V.replicate 25 e]
 
 multi :: MidiLights
 multi =
