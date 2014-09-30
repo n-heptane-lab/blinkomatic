@@ -2,22 +2,33 @@
 module Main where
 
 import Blinkomatic
+import Color (RGB(..), blackRGB, rgb_w2d)
 import Control.Exception (bracket)
 import Control.Monad          (forM_)
 import Control.Monad.Identity (Identity(..))
 import Control.Monad.State (StateT, evalStateT)
 import Control.Monad.Trans (MonadIO(liftIO), lift)
 import Control.Wire (Wire, Event, Session(..), Timed(..), countSession_, stepWire, stepSession)
+import Control.Concurrent.STM      (atomically)
+import Control.Concurrent.STM.TVar (TVar, newTVar, readTVar, writeTVar)
 import Control.Wire.Unsafe.Event
 import Data.Time.Clock
 import qualified Data.IntMap as IntMap
 import Data.IntMap (IntMap)
 import Data.Maybe  (fromJust)
-import qualified Data.Vector.Mutable as V
+import Data.Vector                   (Vector)
+import qualified Data.Vector         as V
+import qualified Data.Vector.Mutable as MV
+import Data.Word (Word8)
 import qualified Graphics.Rendering.OpenGL as GL
 import Graphics.Rendering.OpenGL (($=))
 import qualified Graphics.UI.GLFW as GLFW
 import Sound.NH.MIDI.Core (MIDI(MidiClock))
+
+data Scene = Scene
+  { elWires   :: MV.IOVector Switch
+  , tclLights :: TVar (Vector (RGB Word8))
+  }
 
 colorMap :: IntMap (GL.Color3 GL.GLfloat)
 colorMap = IntMap.fromList
@@ -43,19 +54,30 @@ resize window w h = do
 -- | This will print and clear the OpenGL errors
 printErrors = GL.get GL.errors >>= mapM_ print
 
-drawLights :: (MonadIO m) => GLFW.Window -> V.IOVector Switch -> m ()
-drawLights window v = liftIO $
+drawScene :: (MonadIO m) => GLFW.Window -> Scene -> m ()
+drawScene window scene = liftIO $
   do GL.clear [GL.ColorBuffer, GL.DepthBuffer]
      GL.loadIdentity
-     GL.translate $ GL.Vector3 (-10) 0 (-50 :: GL.GLfloat)
+     GL.translate $ GL.Vector3 (-20) 0 (-50 :: GL.GLfloat)
+     -- el wire
      GL.renderPrimitive GL.Quads $
        forM_ [0..7] $ \i -> do
-         switch <- liftIO $ V.read v (fromIntegral i)
+         switch <- liftIO $ MV.read (elWires scene) (fromIntegral i)
          forM_ [(0,0), (1,0), (1,1), (0, 1)] $ \(x, y) ->
            let vtx = GL.Vertex3 (x + (fromIntegral i * 2)) y 0 :: GL.Vertex3 GL.GLfloat
            in do case switch of
                      Open -> GL.color (GL.Color3 0.1 0.1 (0.1 :: GL.GLfloat))
                      Close  -> GL.color $ fromJust $ IntMap.lookup i colorMap
+                 GL.vertex vtx
+     -- tcl
+     tcl <- atomically $ readTVar $ tclLights scene
+     GL.renderPrimitive GL.Quads $
+       forM_ [0..24::Int] $ \i -> do
+         let light = tcl V.! (fromIntegral i)
+         forM_ [(0,0), (1,0), (1,1), (0, 1)] $ \(x, y) ->
+           let vtx = GL.Vertex3 (x + (fromIntegral i * 2)) (y+10) 0 :: GL.Vertex3 GL.GLfloat
+           in do let RGB r g b = rgb_w2d light
+                 GL.color (GL.Color3 (realToFrac r) (realToFrac g) (realToFrac b :: GL.GLfloat))
                  GL.vertex vtx
      printErrors
 
@@ -64,11 +86,11 @@ drawLights window v = liftIO $
 
 simulateShow :: (MonadIO m) =>
                 GLFW.Window
-             -> V.IOVector Switch
+             -> Scene
              -> Session m (Timed Int ())
              -> MidiLights
              -> m a
-simulateShow window v s0 w0 = loop s0 w0
+simulateShow window scene s0 w0 = loop s0 w0
   where
     loop s' w' = do
       (ds, s) <- stepSession s'
@@ -77,10 +99,11 @@ simulateShow window v s0 w0 = loop s0 w0
         (Right (Event actions)) ->
           do let perform (Print s)     = liftIO $ putStrLn s
                  perform (SendCmd (Command channel switch)) =
-                   liftIO $ V.write v (fromIntegral channel) switch
+                   liftIO $ MV.write (elWires scene) (fromIntegral channel) switch
+                 perform (TCL tcl) = liftIO $ atomically $ writeTVar (tclLights scene) tcl
              mapM_ perform actions
              liftIO $ GLFW.pollEvents
-             drawLights window v
+             drawScene window scene
         _                 -> return ()
       loop s w
 
@@ -91,10 +114,10 @@ simulate bpm midiLights =
     GLFW.makeContextCurrent (Just window)
     GLFW.setWindowSizeCallback window (Just resize)
     GL.depthFunc $= Just GL.Less
-    v <- V.replicate 10 Open
-    simulateShow window v (fakeMidiClock bpm) midiLights
+    el  <- MV.replicate 10 Open
+    tcl <- atomically $ newTVar $ V.replicate 25 blackRGB
+    simulateShow window (Scene el tcl) (fakeMidiClock bpm) midiLights
     return ()
-
 
 fakeMidiClock :: (MonadIO m) => Double -> MidiSession m
 fakeMidiClock bpm =
@@ -109,10 +132,10 @@ fakeMidiClock bpm =
           t <- liftIO getCurrentTime
           let dt = diffUTCTime t t'
               dmc :: Int
-              dmc = floor (realToFrac (dt / secondsPerPulse))
+              dmc = floor (realToFrac (dt / secondsPerPulse) :: Double)
           if dt > secondsPerPulse
             then return (Timed dmc (), loop (addUTCTime ((fromIntegral dmc) * secondsPerPulse) t'))
             else return (Timed 0 (), loop t')
 
 main :: IO ()
-main = simulate 120 newChase
+main = simulate 120 tclFade

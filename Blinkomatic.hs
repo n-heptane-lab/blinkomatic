@@ -307,6 +307,18 @@ rainbow =
         do t <- time -< ()
            returnA -< [TCL $ V.generate 25 $ \i -> rgb_d2w $ hsl2rgb $ HSL ((360/25)*(fromIntegral ((i + (t `div` 4)) `mod` 25))) 1 0.5])
 
+rainbow2 :: MidiLights
+rainbow2 =
+  periodic 1 .
+    (proc _ ->
+        do t <- time -< ()
+           returnA -< [TCL $ V.generate 25 $ \i -> rgb_d2w $ hsl2rgb $ HSL (h i ((t * 4) `mod` 360)) 1 0.5])
+  where
+    h i t =
+      case ((360/25)*(fromIntegral i)+(fromIntegral t)) of
+        h' | h' >= 360 -> h' - 360
+           | otherwise -> h'
+
 decayElem :: MidiWire () (RGB Word8)
 decayElem =
   proc e ->
